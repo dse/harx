@@ -1,0 +1,28 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use v5.10.0;
+
+use File::Basename qw(basename);
+our $PROGNAME = basename($0);
+
+use JSON::XS qw();
+use File::MimeInfo qw(extensions mimetype);
+# we have to make a function call like this at somewhere around this
+# point in order for future extensions() calls to work.
+extensions('text/html');
+
+my $json = JSON::XS->new();
+local $/ = undef;
+while (<>) {
+    my $o = $json->decode($_);
+    foreach my $entry (@{$o->{log}->{entries}}) {
+        my $request  = $entry->{request};
+        my $url      = $request->{url};
+        my $response = $entry->{response};
+        my $status   = $response->{status};
+        my $content  = $response->{content};
+        my $type     = eval { $content->{mimeType} };
+        printf("%-32s %s\n", $type, $url);
+    }
+}
