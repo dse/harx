@@ -39,6 +39,7 @@ use Regexp::Wildcards;
 extensions('text/html');
 
 my $rw = Regexp::Wildcards->new(type => 'unix');
+my $jsonPP = undef;
 
 Getopt::Long::Configure('bundling', 'gnu_compat', 'no_ignore_case');
 Getopt::Long::GetOptions(
@@ -51,6 +52,7 @@ Getopt::Long::GetOptions(
 
         push(@exclude, $rw->convert($ext));
     },
+    'jsonpp|json-pp' => sub { $jsonPP = JSON::XS->new()->pretty(1); },
     'h|help' => sub { usage(); exit(0); },
 );
 
@@ -150,6 +152,10 @@ while (<>) {
                 warn "WARNING: unrecognized encoding '$encoding': $url\n";
             }
         } else {
+            if ($type eq 'application/json' && $jsonPP) {
+                my $o = $json->decode($text);
+                $text = $jsonPP->encode($o);
+            }
             path($filename)->spew($text);
         }
     }
