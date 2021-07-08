@@ -181,7 +181,7 @@ while (<>) {
                 warn "WARNING: unrecognized encoding '$encoding': $url\n";
             }
         } else {
-            if ($type eq 'application/json' && $jsonPP) {
+            if (($type eq 'application/json' || $url =~ m{\.json$}i) && $jsonPP) {
                 my $o = $json->decode($text);
                 $text = $jsonPP->encode($o);
             }
