@@ -34,6 +34,7 @@ our $EXTENSIONS = {
 our @exclude;
 our $verbose;
 our @urlPattern;
+our $jsonPP;
 
 use JSON::XS qw();
 use Path::Tiny qw(path);
@@ -50,11 +51,11 @@ use Regexp::Wildcards;
 extensions('text/html');
 
 my $rw = Regexp::Wildcards->new(type => 'unix');
-my $jsonPP = undef;
 
 Getopt::Long::Configure('bundling', 'gnu_compat', 'no_ignore_case');
 Getopt::Long::GetOptions(
     'u|url-pattern=s' => \@urlPattern,
+    'j|jsonpp|json-pp' => \$jsonPP,
     'v|verbose+' => \$verbose,
     'x|exclude=s' => sub {
         my $ext = lc $_[1];
@@ -64,7 +65,6 @@ Getopt::Long::GetOptions(
 
         push(@exclude, $rw->convert($ext));
     },
-    'jsonpp|json-pp' => sub { $jsonPP = JSON::XS->new()->pretty(1); },
     'h|help' => sub { usage(); exit(0); },
 );
 
@@ -79,7 +79,7 @@ END
 
 @urlPattern = map { qr{$_} } @urlPattern;
 
-my $json = JSON::XS->new();
+my $json = JSON::XS->new()->ascii(1)->pretty(1)->canonical(1);
 my $harCounter = 0;
 local $/ = undef;               # slurp entire files at once
 while (<>) {
@@ -172,19 +172,30 @@ while (<>) {
         if (!defined $text || !$size) {
             next entry;
         }
-        my $filename = sprintf('%s/harx-%04d%s', $dir, ++$filenameCounter, $ext);
-        say $fh sprintf('%-*s %-32s %s', $col1len, $filename, $type, $url);
+
+        my $binary = 0;
         if (defined $encoding) {
             if ($encoding eq 'base64') {
-                path($filename)->spew({ binmode => ':raw' }, decode_base64($text));
+                $binary = 1;
+                $text = decode_base64($text);
             } else {
                 warn "WARNING: unrecognized encoding '$encoding': $url\n";
             }
-        } else {
-            if (($type eq 'application/json' || $url =~ m{\.json$}i) && $jsonPP) {
+        }
+
+        if ($jsonPP) {
+            if ($type eq 'application/json' || $url =~ m{\.json$}i) {
                 my $o = $json->decode($text);
-                $text = $jsonPP->encode($o);
+                $text = $json->encode($o);
             }
+        }
+
+        my $filename = sprintf('%s/harx-%04d%s', $dir, ++$filenameCounter, $ext);
+        say $fh sprintf('%-*s %-32s %s', $col1len, $filename, $type, $url);
+
+        if ($binary) {
+            path($filename)->spew({ binmode => ':raw' }, $text);
+        } else {
             path($filename)->spew($text);
         }
     }
