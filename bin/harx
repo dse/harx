@@ -169,7 +169,7 @@ while (<>) {
         my $encoding = $content->{encoding};
         my $size     = $content->{size};
         my $text     = $content->{text};
-        if (!defined $text || !$size) {
+        if (!defined $text || $text eq '' || !$size) {
             next entry;
         }
 
