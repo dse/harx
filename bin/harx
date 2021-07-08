@@ -3,9 +3,19 @@ use warnings;
 use strict;
 use v5.10.0;
 
+#------------------------------------------------------------------------------
 use File::Basename qw(basename);
 our $PROGNAME = basename($0);
 
+#------------------------------------------------------------------------------
+use open IO => qw(:locale);
+use Encode::Locale;
+use Encode qw(decode);
+BEGIN {
+    @ARGV = map { decode('locale', $_, Encode::FB_CROAK) } @ARGV;
+}
+
+#------------------------------------------------------------------------------
 our $EXTENSIONS = {
     # File::MimeInfo returns a list of extensions given a mime type
     # but the first one isn't always a good "canonical" one.
