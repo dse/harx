@@ -33,6 +33,7 @@ our $EXTENSIONS = {
 
 our @exclude;
 our $verbose;
+our @urlPattern;
 
 use JSON::XS qw();
 use Path::Tiny qw(path);
@@ -53,6 +54,7 @@ my $jsonPP = undef;
 
 Getopt::Long::Configure('bundling', 'gnu_compat', 'no_ignore_case');
 Getopt::Long::GetOptions(
+    'u|url-pattern=s' => \@urlPattern,
     'v|verbose+' => \$verbose,
     'x|exclude=s' => sub {
         my $ext = lc $_[1];
@@ -69,10 +71,13 @@ Getopt::Long::GetOptions(
 sub usage { print(<<"END"); }
 usage: $PROGNAME [<option> ...] [<harfile> ...]
 options:
+    -u, --url-pattern=<pattern>
     -x, --exclude=<ext|mimetype>     Exclude file extensions or MIME types.
                                      Accepts wildcards.
     -h, --help                       Show this message.
 END
+
+@urlPattern = map { qr{$_} } @urlPattern;
 
 my $json = JSON::XS->new();
 my $harCounter = 0;
@@ -110,6 +115,20 @@ while (<>) {
     foreach my $entry (@$entries) {
         my $request  = $entry->{request};
         my $url      = $request->{url};
+
+        if (scalar @urlPattern) {
+            my $matches = 0;
+            foreach my $urlPattern (@urlPattern) {
+                if ($url =~ $urlPattern) {
+                    $matches = 1;
+                    last;
+                }
+            }
+            if (!$matches) {
+                next entry;
+            }
+        }
+
         my $response = $entry->{response};
         my $status   = $response->{status};
         next if $status == 307; # internal redirect
