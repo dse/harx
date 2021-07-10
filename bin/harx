@@ -136,7 +136,8 @@ while (<>) {
         next if $status < 100;  # invalid response code
         my $content  = $response->{content};
 
-        my $type = $content->{mimeType};
+        my $mimeType = $content->{mimeType};
+        my $type     = $mimeType;
         $type = undef if $type eq '';
         $type = undef if $type eq 'application/octet-stream';
 
@@ -163,7 +164,7 @@ while (<>) {
             }
         }
 
-        my $ext = eval { $EXTENSIONS->{$type}->{ext} } // $ext[0] // '';
+        my $ext = eval { (defined $type && exists $EXTENSIONS->{$type}) ? $EXTENSIONS->{$type}->{ext} : undef } // $ext[0] // '';
         $ext = ".$ext" if $ext ne '';
 
         my $encoding = $content->{encoding};
@@ -191,7 +192,7 @@ while (<>) {
         }
 
         my $filename = sprintf('%s/harx-%04d%s', $dir, ++$filenameCounter, $ext);
-        say $fh sprintf('%-*s %-32s %s', $col1len, $filename, $type, $url);
+        say $fh sprintf('%-*s %-32s %s', $col1len, $filename, $mimeType, $url);
 
         if ($binary) {
             path($filename)->spew({ binmode => ':raw' }, $text);
