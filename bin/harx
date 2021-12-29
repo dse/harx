@@ -114,6 +114,7 @@ while (<>) {
   entry:
     foreach my $entry (@$entries) {
         my $request  = $entry->{request};
+        my $method   = $request->{method};
         my $url      = $request->{url};
 
         if (scalar @urlPattern) {
@@ -192,7 +193,7 @@ while (<>) {
         }
 
         my $filename = sprintf('%s/harx-%04d%s', $dir, ++$filenameCounter, $ext);
-        say $fh sprintf('%-*s %-32s %s', $col1len, $filename, $mimeType, $url);
+        say $fh sprintf('%-*s %-32s %-7s %s', $col1len, $filename, $mimeType, $method, $url);
 
         if ($binary) {
             path($filename)->spew({ binmode => ':raw' }, $text);
