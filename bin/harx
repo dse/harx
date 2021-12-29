@@ -1,10 +1,10 @@
 #!/usr/bin/env perl
 use warnings;
 use strict;
-use v5.10.0;
+use feature 'say';
 
 #------------------------------------------------------------------------------
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 our $PROGNAME = basename($0);
 
 #------------------------------------------------------------------------------
@@ -45,6 +45,7 @@ use MIME::Base64 qw(decode_base64);
 use Getopt::Long;
 use File::Glob qw(:bsd_glob);
 use Regexp::Wildcards;
+use URI;
 
 # we have to make a function call like this at somewhere around this
 # point in order for future extensions() calls to work.
@@ -59,10 +60,7 @@ Getopt::Long::GetOptions(
     'v|verbose+' => \$verbose,
     'x|exclude=s' => sub {
         my $ext = lc $_[1];
-
-        # make '*.jpg', '.jpg', and 'jpg' equivalent.
-        $ext =~ s{^\*?\.}{};
-
+        $ext =~ s{^\*?\.}{}; # make '*.jpg', '.jpg', and 'jpg' equivalent.
         push(@exclude, $rw->convert($ext));
     },
     'h|help' => sub { usage(); exit(0); },
@@ -84,12 +82,17 @@ my $harCounter = 0;
 local $/ = undef;               # slurp entire files at once
 while (<>) {
     my $filenameCounter = 0;    # for generating filenames
+    my $fileCounter = 0;
+
     my $o = $json->decode($_);
     my $base;
+    my $har;
     if ($ARGV eq '-') {
         $base = sprintf('%04d.har', ++$harCounter);
+        $har = '(standard input)';
     } else {
-        $base = $ARGV;          # usually something like 'www.xxx.com.har'
+        $base = $ARGV;      # usually something like 'www.xxx.com.har'
+        $har = $ARGV;
     }
     $base =~ s{\.har$}{};
 
@@ -98,19 +101,19 @@ while (<>) {
 
     if (-d $dir) {
         # leave files not matching harx-####.xxx alone.
-        my @cleanup = bsd_glob("$dir/harx-*");
+        my @cleanup = (bsd_glob("$dir/response-data/harx-*"),
+                       bsd_glob("$dir/harx-*"),
+                       bsd_glob("$dir/post-data/post-*"));
         if (scalar @cleanup) {
             warn(sprintf("cleaning up %d files in %s\n", scalar @cleanup, $dir)) if $verbose;
             unlink(@cleanup);
         }
-    } else {
-        make_path($dir);
     }
     my $log = $o->{log};
     my $entries = $log->{entries};
     my $fh;
     open($fh, '>', $indexFilename) or die("cannot write $indexFilename: $!\n");
-    my $col1len = length(sprintf('%s/harx-%04d%s', $dir, 0, '.xxxxxxxx'));
+    my $col1len = length(sprintf('%s/response-data/harx-%04d%s', $dir, 0, '.xxxxxxxx'));
   entry:
     foreach my $entry (@$entries) {
         my $request  = $entry->{request};
@@ -135,43 +138,14 @@ while (<>) {
         next if $status == 307; # internal redirect
         next if $status > 399;  # failed request
         next if $status < 100;  # invalid response code
+
         my $content  = $response->{content};
-
         my $mimeType = $content->{mimeType};
-        my $type     = $mimeType;
-        $type = undef if $type eq '';
-        $type = undef if $type eq 'application/octet-stream';
-
-        my @ext;
-        if (defined $type) {
-            @ext = extensions($type);
-            @ext = grep { defined $_ && $_ ne '' } @ext;
-        }
-
-        if (!scalar @ext) {
-            if ($url =~ m{\.([0-9A-Za-z]+)(?:\?.*)?$}) {
-                my $ext = $1;
-                if (!defined $type) {
-                    $type = mimetype("/thisdirectorydoesnotexist/thisfiledoesnotexist.$ext");
-                }
-                push(@ext, $ext);
-            }
-        }
-
-        foreach my $rx (@exclude) {
-            next entry if $type =~ $rx;
-            foreach my $ext (@ext) {
-                next entry if $ext =~ $rx;
-            }
-        }
-
-        my $ext = eval { (defined $type && exists $EXTENSIONS->{$type}) ? $EXTENSIONS->{$type}->{ext} : undef } // $ext[0] // '';
-        $ext = ".$ext" if $ext ne '';
-
+        my ($ext, $type) = extension($mimeType, $url);
         my $encoding = $content->{encoding};
         my $size     = $content->{size};
         my $text     = $content->{text};
-        if (!defined $text || $text eq '' || !$size) {
+        if (!defined $text || $text eq '' || !defined $size || !$size) {
             next entry;
         }
 
@@ -185,22 +159,113 @@ while (<>) {
             }
         }
 
-        if ($jsonPP) {
-            if ($type eq 'application/json' || $url =~ m{\.json$}i) {
-                my $o = $json->decode($text);
-                $text = $json->encode($o);
-            }
+        if ($jsonPP && ($type eq 'application/json' || $type eq 'application/x-amz-json-1.1' || $url =~ m{\.json$}i)) {
+            $text = jsonReencode($text);
         }
 
-        my $filename = sprintf('%s/harx-%04d%s', $dir, ++$filenameCounter, $ext);
-        say $fh sprintf('%-*s %-32s %-7s %s', $col1len, $filename, $mimeType, $method, $url);
-
+        my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, ++$filenameCounter, $ext // '');
+        make_path(dirname($filename));
         if ($binary) {
             path($filename)->spew({ binmode => ':raw' }, $text);
         } else {
             path($filename)->spew($text);
         }
+        ++$fileCounter;
+
+        say $fh sprintf('%-*s %-5s %-32s %-7s %s', $col1len, $filename, $binary ? '(bin)' : '-', $mimeType, $method, $url);
+
+        if ($method eq 'POST') {
+            my $postData = $request->{postData};
+            if (defined $postData) {
+                my $mimeType = $postData->{mimeType};
+                $mimeType =~ s{;.*$}{};
+
+                my $text = $postData->{text};
+                if ($jsonPP && ($mimeType eq 'application/json' || $mimeType eq 'application/x-amz-json-1.1')) {
+                    $text = jsonReencode($text);
+                }
+
+                my ($ext, $type) = extension($mimeType);
+                my $filename = sprintf('%s/post-data/post-%04d%s', $dir, $filenameCounter, $ext // '');
+                make_path(dirname($filename));
+                path($filename)->spew($text);
+                ++$fileCounter;
+
+                say $fh sprintf('%-*s %-5s %-32s %-7s', $col1len, $filename, '-', $mimeType, '(data)');
+            }
+        }
     }
     close($fh);
-    printf("wrote %d files into %s directory; index generated: %s\n", $filenameCounter, $dir, $indexFilename);
+    print("[$har]\n");
+    print("    directory = $dir\n");
+    print("    index     = $indexFilename\n");
+    print("    fileCount = $fileCounter\n");
+}
+
+sub indent {
+    my ($s, $indentFirstLine, $indentOtherLines) = @_;
+    $indentFirstLine //= ' ' x 4;
+    $indentOtherLines //= $indentFirstLine;
+    $s =~ s{\A}{$indentFirstLine};
+    $s =~ s{(?<=.)^}{$indentOtherLines}gms;
+    return $s;
+}
+
+sub extension {
+    my ($mimeType, $url) = @_;
+
+    my $type = $mimeType;
+    $type = undef if $type eq '';
+    $type = undef if $type eq 'application/octet-stream';
+
+    my @ext;
+    if (defined $type) {
+        @ext = extensions($type);
+        @ext = grep { defined $_ && $_ ne '' } @ext;
+    }
+
+    if (defined $url && !scalar @ext) {
+        my $uri = URI->new($url);
+        my $path = $uri->path;
+        if ($path =~ m{\.([0-9A-Za-z]+)$}) {
+            my $ext = $1;
+            if (!defined $type) {
+                $type = mimetype("/thisdirectorydoesnotexist/thisfiledoesnotexist.$ext");
+            }
+            push(@ext, $ext);
+        }
+    }
+
+    foreach my $rx (@exclude) {
+        next entry if $type =~ $rx;
+        foreach my $ext (@ext) {
+            next entry if $ext =~ $rx;
+        }
+    }
+
+    my $ext = eval { (defined $type && exists $EXTENSIONS->{$type}) ? $EXTENSIONS->{$type}->{ext} : undef } // $ext[0] // '';
+    $ext = ".$ext" if $ext ne '';
+
+    return ($ext, $type);
+}
+
+sub jsonReencode {
+    my ($text) = @_;
+    my $o = eval { $json->decode($text); };
+    my $error = $@;
+    if (defined $o) {
+        return $json->encode($o);
+    }
+    if (!defined $error) {
+        return;
+    }
+
+    # specific to certain AWS page data requests
+    if ($error =~ m{^garbage after JSON object, at character offset \d+ \(before "!CW-Client-Metrics!\\n\.\.\."\)}) {
+        my (@text) = split(/!CW-Client-Metrics!/, $text);
+        @text = map { jsonReencode($_) } @text;
+        return join("\n!CW-Client-Metrics!\n", @text);
+    }
+
+    die($error);
 }
