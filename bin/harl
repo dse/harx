@@ -18,11 +18,12 @@ while (<>) {
     my $o = $json->decode($_);
     foreach my $entry (@{$o->{log}->{entries}}) {
         my $request  = $entry->{request};
+        my $method   = $request->{method};
         my $url      = $request->{url};
         my $response = $entry->{response};
         my $status   = $response->{status};
         my $content  = $response->{content};
         my $type     = eval { $content->{mimeType} };
-        printf("%-32s %s\n", $type, $url);
+        printf("%-32s %s %s\n", $type, $method, $url);
     }
 }
