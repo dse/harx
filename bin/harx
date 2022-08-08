@@ -35,6 +35,7 @@ our @exclude;
 our $verbose;
 our @urlPattern;
 our $jsonPP;
+our $mirror;
 
 use JSON::XS qw();
 use Path::Tiny qw(path);
@@ -64,6 +65,7 @@ Getopt::Long::GetOptions(
         push(@exclude, $rw->convert($ext));
     },
     'h|help' => sub { usage(); exit(0); },
+    'm|mirror' => \$mirror,
 );
 
 sub usage { print(<<"END"); }
@@ -72,6 +74,8 @@ options:
     -u, --url-pattern=<pattern>
     -x, --exclude=<ext|mimetype>     Exclude file extensions or MIME types.
                                      Accepts wildcards.
+    -j, --jsonpp, --json-pp          Reformat JSON responses.
+    -v, --verbose                    Increase stderr output.
     -h, --help                       Show this message.
 END
 
@@ -96,13 +100,14 @@ while (<>) {
     }
     $base =~ s{\.har$}{};
 
-    my $dir           = $base . '.harx';
-    my $indexFilename = $base . '.harx.txt';
+    my $dir           = $base . '.har.d';
+    my $indexFilename = $base . '.har.d/00INDEX.txt';
 
     if (-d $dir) {
         # leave files not matching harx-####.xxx alone.
         my @cleanup = (bsd_glob("$dir/response-data/harx-*"),
                        bsd_glob("$dir/harx-*"),
+                       bsd_glob("$dir/00INDEX.txt"),
                        bsd_glob("$dir/post-data/post-*"));
         if (scalar @cleanup) {
             warn(sprintf("cleaning up %d files in %s\n", scalar @cleanup, $dir)) if $verbose;
@@ -112,14 +117,15 @@ while (<>) {
     my $log = $o->{log};
     my $entries = $log->{entries};
     my $fh;
+    make_path(dirname($indexFilename));
     open($fh, '>', $indexFilename) or die("cannot write $indexFilename: $!\n");
     my $col1len = length(sprintf('%s/response-data/harx-%04d%s', $dir, 0, '.xxxxxxxx'));
-  entry:
+
+    # determine which ones to skip
+  entry1:
     foreach my $entry (@$entries) {
         my $request  = $entry->{request};
-        my $method   = $request->{method};
         my $url      = $request->{url};
-
         if (scalar @urlPattern) {
             my $matches = 0;
             foreach my $urlPattern (@urlPattern) {
@@ -129,25 +135,101 @@ while (<>) {
                 }
             }
             if (!$matches) {
-                next entry;
+                $entry->{skip} = 1;
+                next entry1;
             }
         }
-
         my $response = $entry->{response};
         my $status   = $response->{status};
-        next if $status == 307; # internal redirect
-        next if $status > 399;  # failed request
-        next if $status < 100;  # invalid response code
+        #   internal redir.   failed req.      invalid resp. code
+        #   vvvvvvvvvvvvvv    vvvvvvvvvvvvv    vvvvvvvvvvvvv
+        if ($status == 307 || $status > 399 || $status < 100) {
+            $entry->{skip} = 1;
+            next entry1;
+        }
+        my $content  = $response->{content};
+        if (!defined $content->{text} || $content->{text} eq '' || !defined $content->{size} || !$content->{size}) {
+            $entry->{skip} = 1;
+            next entry1;
+        }
+        my $mimeType = $content->{mimeType};
+        my ($ext, $type, @ext) = extension($mimeType, $url);
+        foreach my $rx (@exclude) {
+            if ($type =~ $rx) {
+                $entry->{skip} = 1;
+                next entry1;
+            }
+            foreach my $ext (@ext) {
+                if ($ext =~ $rx) {
+                    $entry->{skip} = 1;
+                    next entry1;
+                }
+            }
+        }
+        $entry->{ext} = $ext;
+    }
 
+    # determine initial filenames
+    foreach my $entry (@$entries) {
+        my $url = $entry->{request}->{url};
+        my $ext = $entry->{ext};
+        my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, ++$filenameCounter, $ext // '');
+        if ($mirror) {
+            my $uri = URI->new($url);
+            my $basename = $uri->path;
+            $basename =~ s{^/+}{};
+            $basename =~ s{/+$}{};
+            if ($basename eq '' || $basename eq '/') {
+                $basename = 'ROOT';
+            }
+            my $query = $uri->query;
+            if (defined $query && $query ne '') {
+                $basename .= '?' . $query;
+            }
+            $filename = sformat('%{dir}s/response-data/%{scheme}s/%{host_port}s/%{basename}s',
+                                dir       => $dir,
+                                scheme    => $uri->scheme,
+                                host_port => $uri->host_port,
+                                basename  => $basename);
+        }
+        $entry->{filename} = $filename;
+        $entry->{dirname} = dirname($filename);
+        print("$filename\n");
+    }
+
+    # find any filename/dirname clashes
+    my %entriesByFilename;
+    my %entriesByDirname;
+    my %filename;
+    my %dirname;
+    foreach my $entry (@$entries) {
+        $filename{$entry->{filename}} += 1;
+        $dirname{$entry->{dirname}} += 1;
+        push(@{$entriesByFilename{$entry->{filename}}}, $entry);
+        push(@{$entriesByDirname{$entry->{dirname}}}, $entry);
+    }
+
+    foreach my $filename (keys %filename) {
+        if ($dirname{$filename}) {
+            warn("filename/dirname clash:\n");
+            warn("    $filename\n");
+        }
+    }
+
+    foreach my $entry (@$entries) {
+        next if $entry->{skip};
+
+        my $request  = $entry->{request};
+        my $method   = $request->{method};
+        my $url      = $request->{url};
+        my $response = $entry->{response};
+        my $status   = $response->{status};
         my $content  = $response->{content};
         my $mimeType = $content->{mimeType};
         my ($ext, $type) = extension($mimeType, $url);
         my $encoding = $content->{encoding};
         my $size     = $content->{size};
         my $text     = $content->{text};
-        if (!defined $text || $text eq '' || !defined $size || !$size) {
-            next entry;
-        }
 
         my $binary = 0;
         if (defined $encoding) {
@@ -163,8 +245,15 @@ while (<>) {
             $text = jsonReencode($text);
         }
 
-        my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, ++$filenameCounter, $ext // '');
-        make_path(dirname($filename));
+        my $filename = $entry->{filename};
+        my $dirname = $entry->{dirname};
+        if (!-e $dirname) {
+            make_path(dirname($filename));
+        } elsif (-d $dirname) {
+            # do nothing
+        } else {
+            die("$dirname: file exists\n");
+        }
         if ($binary) {
             path($filename)->spew({ binmode => ':raw' }, $text);
         } else {
@@ -236,17 +325,10 @@ sub extension {
         }
     }
 
-    foreach my $rx (@exclude) {
-        next entry if $type =~ $rx;
-        foreach my $ext (@ext) {
-            next entry if $ext =~ $rx;
-        }
-    }
-
     my $ext = eval { (defined $type && exists $EXTENSIONS->{$type}) ? $EXTENSIONS->{$type}->{ext} : undef } // $ext[0] // '';
     $ext = ".$ext" if $ext ne '';
 
-    return ($ext, $type);
+    return ($ext, $type, @ext);
 }
 
 sub jsonReencode {
@@ -268,4 +350,19 @@ sub jsonReencode {
     }
 
     die($error);
+}
+
+# behavior is undefined if * flag is used.
+sub sformat {
+    my ($format, %args) = @_;
+    my @sprintf_args;
+    my $sprintf_format = $format;
+    $sprintf_format =~ s{ % \{ ([^\}]*) \} }{
+        push(@sprintf_args, $args{$1});
+        '%';
+    }gxe;
+    if (wantarray) {
+        return ($sprintf_format, @sprintf_args);
+    }
+    return sprintf($sprintf_format, @sprintf_args);
 }
