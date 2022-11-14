@@ -171,9 +171,10 @@ while (<>) {
 
     # determine initial filenames
     foreach my $entry (@$entries) {
+        $entry->{counter} = ++$filenameCounter;
         my $url = $entry->{request}->{url};
         my $ext = $entry->{ext};
-        my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, ++$filenameCounter, $ext // '');
+        my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, $entry->{counter}, $ext // '');
         if ($mirror) {
             my $uri = URI->new($url);
             my $basename = $uri->path;
@@ -275,7 +276,7 @@ while (<>) {
                 }
 
                 my ($ext, $type) = extension($mimeType);
-                my $filename = sprintf('%s/post-data/post-%04d%s', $dir, $filenameCounter, $ext // '');
+                my $filename = sprintf('%s/post-data/post-%04d%s', $dir, $entry->{counter}, $ext // '');
                 make_path(dirname($filename));
                 path($filename)->spew($text);
                 ++$fileCounter;
