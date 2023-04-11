@@ -74,238 +74,37 @@ options:
 END
 
 @urlPattern = map { qr{$_} } @urlPattern;
-
 my $json = JSON::XS->new()->ascii(1)->pretty(1)->canonical(1);
 my $harCounter = 0;
 local $/ = undef;               # slurp entire files at once
 while (<>) {
-    my $filenameCounter = 0;    # for generating filenames
-    my $fileCounter = 0;
-
-    my $o = $json->decode($_);
-    my $base;
-    my $har;
-    if ($ARGV eq '-') {
-        $base = sprintf('%04d.har', ++$harCounter);
-        $har = '(standard input)';
-    } else {
-        $base = $ARGV;      # usually something like 'www.xxx.com.har'
-        $har = $ARGV;
-    }
-    $base =~ s{\.har$}{};
-
-    my $dir = $base . '.har.d';
-    my $indexFilename = $base . '.har.d/00INDEX.txt';
-
+    my $dir = harDirname($ARGV);
     cleanup($dir);
 
+    my $indexFilename = "${dir}/00INDEX.txt";
+    make_path(dirname($indexFilename));
+    my $fhIndex;
+    open($fhIndex, '>', $indexFilename) or die("$indexFilename: $!");
+
+    my $o = $json->decode($_);
     my $log = $o->{log};
     my $entries = $log->{entries};
-    make_path(dirname($indexFilename));
-    my $fh;
-    open($fh, '>', $indexFilename) or die("$indexFilename: $!");
+    $entries = [grep { !skipEntry($_) } @$entries];
 
-    my $col1len = length(sprintf('%s/response-data/harx-%04d%s', $dir, 0, '.xxxxxxxx')); # example string
-
-    # determine which ones to skip
-  entry1:
+    my $counter = 0;
     foreach my $entry (@$entries) {
-        my $request = $entry->{request};
-        my $url = $request->{url};
-        if (scalar @urlPattern && !matchUrl($url)) {
-            $entry->{skip} = 1;
-            next;
-        }
-        my $response = $entry->{response};
-        my $status = $response->{status};
-        if ($status == INTERNAL_REDIRECT || $status > SUCCESS_MAX || $status < RESPONSE_MIN) {
-            $entry->{skip} = 1;
-            next;
-        }
-        my $content = $response->{content};
-        if (!defined $content->{text}) {
-            $entry->{skip} = 1;
-            next entry1;
-        }
-        my $mimeType = $content->{mimeType};
-        $mimeType = getMimeType($mimeType, $url);
-        my @ext = getFileExtensions($mimeType, $url);
-        foreach my $rx (@exclude) {
-            if ($mimeType =~ $rx) {
-                $entry->{skip} = 1;
-                next entry1;
-            }
-            foreach my $ext (@ext) {
-                if ($ext =~ $rx) {
-                    $entry->{skip} = 1;
-                    next entry1;
-                }
-            }
-        }
-        $entry->{ext} = $ext[0];
+        $entry->{counter} = ++$counter;
+        $entry->{dir} = $dir;
+        setEntryFileExtension($entry);
+        setEntryInitialFilename($entry);
+        writeEntryData($entry, $fhIndex);
     }
+    close($fhIndex);
 
-    # determine initial filenames
-    foreach my $entry (@$entries) {
-        $entry->{counter} = ++$filenameCounter;
-        my $url = $entry->{request}->{url};
-        my $ext = $entry->{ext};
-        my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, $entry->{counter}, $ext // '');
-        if ($mirror) {
-            my $uri = URI->new($url);
-            my $basename = $uri->path;
-            $basename =~ s{^/+}{};
-            $basename =~ s{/+$}{};
-            if ($basename eq '' || $basename eq '/') {
-                $basename = 'ROOT';
-            }
-            my $query = $uri->query;
-            if (defined $query && $query ne '') {
-                $basename .= '?' . $query;
-            }
-            $filename = sformat('%{dir}s/response-data/%{scheme}s/%{host_port}s/%{basename}s',
-                                dir       => $dir,
-                                scheme    => $uri->scheme,
-                                host_port => $uri->host_port,
-                                basename  => $basename);
-        }
-        $entry->{filename} = $filename;
-        $entry->{dirname} = dirname($filename);
-    }
-
-    # find any filename/dirname clashes
-    my %entriesByFilename;
-    my %entriesByDirname;
-    my %filename;
-    my %dirname;
-    foreach my $entry (@$entries) {
-        $filename{$entry->{filename}} += 1;
-        $dirname{$entry->{dirname}} += 1;
-        push(@{$entriesByFilename{$entry->{filename}}}, $entry);
-        push(@{$entriesByDirname{$entry->{dirname}}}, $entry);
-    }
-
-    foreach my $filename (keys %filename) {
-        if ($dirname{$filename}) {
-            warn("filename/dirname clash:\n");
-            warn("    $filename\n");
-        }
-    }
-
-    foreach my $entry (@$entries) {
-        next if $entry->{skip};
-
-        my $request  = $entry->{request};
-        my $method   = $request->{method};
-        my $url      = $request->{url};
-        my $response = $entry->{response};
-        my $status   = $response->{status};
-        my $content  = $response->{content};
-        my $mimeType = $content->{mimeType};
-        my ($ext, $type) = extension($mimeType, $url);
-        my $encoding = $content->{encoding};
-        my $text     = $content->{text};
-
-        my $binary = 0;
-        if (defined $encoding) {
-            if ($encoding eq 'base64') {
-                $binary = 1;
-                $text = decode_base64($text);
-            } else {
-                warn "WARNING: unrecognized encoding '$encoding': $url\n";
-            }
-        }
-
-        if ($recurse) {
-            $text = recurseText($text);
-        }
-        if ($jsonPP) {
-            if (defined $type) {
-                if (($type eq 'application/json' || $type eq 'application/x-amz-json-1.1')) {
-                    $text = reencode($text);
-                }
-            } else {
-                if ($url =~ m{\.json$}) {
-                    $text = reencode($text);
-                }
-            }
-        }
-
-        my $filename = $entry->{filename};
-        my $dirname = $entry->{dirname};
-        if (!-e $dirname) {
-            make_path(dirname($filename));
-        } elsif (-d $dirname) {
-            # do nothing
-        } else {
-            die("$dirname: file exists and is not a directory\n");
-        }
-        if ($binary) {
-            path($filename)->spew({ binmode => ':raw' }, $text);
-        } else {
-            path($filename)->spew($text);
-        }
-        ++$fileCounter;
-
-        printf $fh ("%-*s %-5s %-32s %-7s %s\n",
-                    $col1len, $filename, $binary ? '(bin)' : '-', $mimeType, $method, $url);
-
-        if ($method eq 'POST') {
-            my $postData = $request->{postData};
-            if (defined $postData) {
-                my $mimeType = $postData->{mimeType};
-                $mimeType =~ s{;.*$}{};
-
-                my $text = $postData->{text};
-                if ($jsonPP && ($mimeType eq 'application/json' || $mimeType eq 'application/x-amz-json-1.1')) {
-                    if ($recurse) {
-                        $text = recurseText($text);
-                    }
-                    if ($jsonPP) {
-                        $text = reencode($text);
-                    }
-                } elsif ($mimeType eq 'application/x-www-form-urlencoded') {
-                    my $obj = {};
-                    my @text = split('&', $text);
-                    foreach my $nameValue (@text) {
-                        my @split = map { uri_unescape($_) } split('=', $nameValue);
-                        s/\+/ /g for @split;
-                        my ($name, @values) = @split;
-                        foreach my $value (@values) {
-                            if (exists $obj->{$name}) {
-                                if (ref $obj->{$name} eq 'ARRAY') {
-                                    push(@{$obj->{$name}}, $value);
-                                } else {
-                                    $obj->{$name} = [$obj->{$name}, $value];
-                                }
-                            } else {
-                                $obj->{$name} = $value;
-                            }
-                        }
-                    }
-                    if ($recurse) {
-                        $obj = recurse($obj);
-                    }
-                    $text = $json->encode($obj);
-                } else {
-                    print("??? $mimeType\n");
-                }
-
-                my ($ext, $type) = extension($mimeType);
-                my $filename = sprintf('%s/post-data/post-%04d%s', $dir, $entry->{counter}, $ext // '');
-                make_path(dirname($filename));
-                path($filename)->spew($text);
-                ++$fileCounter;
-
-                printf $fh ("%-*s %-5s %-32s %-7s\n", $col1len, $filename, '-', $mimeType, '(data)');
-            }
-        }
-    }
-    close($fh);
-    print("[$har]\n");
-    print("    directory = $dir\n");
-    print("    index     = $indexFilename\n");
-    print("    fileCount = $fileCounter\n");
+    my $header = ($ARGV eq '-') ? '(stdin)' : "[$ARGV]";
+    print("[${header}]\n");
+    print("    directory = ${dir}\n");
+    print("    index     = ${indexFilename}\n");
 }
 
 sub indent {
@@ -317,50 +116,20 @@ sub indent {
     return $s;
 }
 
-sub extension {
-    my ($mimeType, $url) = @_;
-
-    my $type = $mimeType;
-    $type = undef if $type eq '';
-    $type = undef if $type eq 'application/octet-stream';
-
-    my @ext;
-    if (defined $type) {
-        @ext = File::MimeInfo::extensions($type);
-        @ext = grep { defined $_ && $_ ne '' } @ext;
-    }
-
-    if (defined $url && !scalar @ext) {
-        my $uri = URI->new($url);
-        my $path = $uri->path;
-        if ($path =~ m{\.([0-9A-Za-z]+)$}) {
-            my $ext = $1;
-            if (!defined $type) {
-                $type = File::MimeInfo::mimetype("/thisdirectorydoesnotexist/thisfiledoesnotexist.$ext");
-            }
-            push(@ext, $ext);
-        }
-    }
-
-    my $ext = eval { (defined $type && exists $EXTENSIONS->{$type}) ? $EXTENSIONS->{$type}->{ext} : undef } // $ext[0] // '';
-    $ext = ".$ext" if $ext ne '';
-
-    return ($ext, $type, @ext);
-}
-
 sub getMimeType {
     my ($mimeType, $url) = @_;
-    my $type = $mimeType;
-    if ($type eq '' || $type eq 'application/octet-stream') {
-        $type = undef;
+    if ($mimeType eq '' || $mimeType eq 'application/octet-stream') {
+        $mimeType = undef;
     }
-    if (defined $type) {
-        return $type;
+    if (defined $mimeType) {
+        return $mimeType;
     }
-    my $uriObj = URI->new($url);
-    my $path = $uriObj->path;
-    my $ext = (fileparse($path))[2];
-    return File::MimeInfo::mimetype("/thisdirectorydoesnotexist/thisfiledoesnotexist.$ext");
+    if (defined $url) {
+        my $uriObj = URI->new($url);
+        my $path = $uriObj->path;
+        my $ext = (fileparse($path))[2];
+        return File::MimeInfo::mimetype("/thisdirectorydoesnotexist/thisfiledoesnotexist.$ext");
+    }
 }
 
 sub getFileExtensions {
@@ -489,4 +258,203 @@ sub distinct {
         $values{$value} = 1;
     }
     return @distinct;
+}
+
+sub mimeTypeIsJson {
+    my ($mimeType) = @_;
+    return ($mimeType eq 'application/json' || $mimeType eq 'application/x-amz-json-1.1');
+}
+
+sub formData {
+    my ($data) = @_;
+    my $obj = {};
+    my @data = split('&', $data);
+    foreach my $nameValue (@data) {
+        my @split = map { uri_unescape($_) } split('=', $nameValue);
+        s/\+/ /g for @split;
+        my ($name, @values) = @split;
+        foreach my $value (@values) {
+            if (exists $obj->{$name}) {
+                if (ref $obj->{$name} eq 'ARRAY') {
+                    push(@{$obj->{$name}}, $value);
+                } else {
+                    $obj->{$name} = [$obj->{$name}, $value];
+                }
+            } else {
+                $obj->{$name} = $value;
+            }
+        }
+    }
+    return $obj;
+}
+
+sub skipEntry {
+    my ($entry) = @_;
+    my $request = $entry->{request};
+    my $url = $request->{url};
+    if (scalar @urlPattern && !matchUrl($url)) {
+        return 1;
+    }
+    my $response = $entry->{response};
+    my $status = $response->{status};
+    if ($status == INTERNAL_REDIRECT || $status > SUCCESS_MAX || $status < RESPONSE_MIN) {
+        return 1;
+    }
+    my $content = $response->{content};
+    if (!defined $content->{text}) {
+        return 1;
+    }
+    my $mimeType = $content->{mimeType};
+    $mimeType = getMimeType($mimeType, $url);
+    my @ext = getFileExtensions($mimeType, $url);
+    foreach my $rx (@exclude) {
+        if ($mimeType =~ $rx) {
+            return 1;
+        }
+        foreach my $ext (@ext) {
+            if ($ext =~ $rx) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+sub setEntryFileExtension {
+    my ($entry) = @_;
+    my $request = $entry->{request};
+    my $url = $request->{url};
+    my $response = $entry->{response};
+    my $content = $response->{content};
+    my $mimeType = $content->{mimeType};
+    $mimeType = getMimeType($mimeType, $url);
+    $entry->{mimeType} = $mimeType;
+    my @ext = getFileExtensions($mimeType, $url);
+    $entry->{ext} = $ext[0];
+}
+
+sub setEntryInitialFilename {
+    my ($entry) = @_;
+    my $url = $entry->{request}->{url};
+    my $ext = $entry->{ext};
+    my $dir = $entry->{dir};
+    my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, $entry->{counter}, $ext // '');
+    if ($mirror) {
+        my $uri = URI->new($url);
+        my $basename = $uri->path;
+        $basename =~ s{^/+}{};
+        $basename =~ s{/+$}{};
+        if ($basename eq '' || $basename eq '/') {
+            $basename = 'ROOT';
+        }
+        my $query = $uri->query;
+        if (defined $query && $query ne '') {
+            $basename .= '?' . $query;
+        }
+        $filename = sformat('%{dir}s/response-data/%{scheme}s/%{host_port}s/%{basename}s',
+                            dir       => $dir,
+                            scheme    => $uri->scheme,
+                            host_port => $uri->host_port,
+                            basename  => $basename);
+    }
+    $entry->{filename} = $filename;
+    $entry->{dirname} = dirname($filename);
+}
+
+sub harDirname {
+    my ($argv) = @_;
+    my $dirname;
+    if ($argv eq '-') {
+        return 'stdin.har.d';
+    } else {
+        $dirname = $argv;
+        $dirname =~ s{\.har$}{};
+        return "${dirname}.har.d";
+    }
+}
+
+sub writeEntryData {
+    my ($entry, $fhIndex) = @_;
+
+    my $request  = $entry->{request};
+    my $method   = $request->{method};
+    my $url      = $request->{url};
+    my $response = $entry->{response};
+    my $status   = $response->{status};
+    my $content  = $response->{content};
+    my $mimeType = $entry->{mimeType};
+    my $ext      = $entry->{ext};
+    my $text     = $content->{text};
+
+    my $binary = 0;
+    my $encoding = $content->{encoding};
+    if (defined $encoding) {
+        if ($encoding eq 'base64') {
+            $binary = 1;
+            $text = decode_base64($text);
+        } else {
+            warn "WARNING: unrecognized encoding '$encoding': $url\n";
+        }
+    }
+    if ($recurse) {
+        $text = recurseText($text);
+    }
+    if ($jsonPP) {
+        if (defined $mimeType) {
+            if (($mimeType eq 'application/json' || $mimeType eq 'application/x-amz-json-1.1')) {
+                $text = reencode($text);
+            }
+        } else {
+            if ($url =~ m{\.json$}) {
+                $text = reencode($text);
+            }
+        }
+    }
+
+    my $filename = $entry->{filename};
+    my $dirname = $entry->{dirname};
+    if (!-e $dirname) {
+        make_path(dirname($filename));
+    } elsif (!-d $dirname) {
+        die("$dirname: file exists and is not a directory\n");
+    }
+    if ($binary) {
+        path($filename)->spew({ binmode => ':raw' }, $text);
+    } else {
+        path($filename)->spew($text);
+    }
+
+    my $col1len = length(sprintf('%s/response-data/harx-%04d%s', $entry->{dir}, 0, '.xxxxxxxx')); # example string
+    printf $fhIndex ("%-*s %-5s %-32s %-7s %s\n",
+                     $col1len, $filename, $binary ? '(bin)' : '-', $mimeType, $method, $url);
+
+    if ($method eq 'POST') {
+        my $postData = $request->{postData};
+        if (defined $postData) {
+            my $mimeType = $postData->{mimeType};
+            $mimeType =~ s{;.*$}{};
+            my $text = $postData->{text};
+            if ($jsonPP && mimeTypeIsJson($mimeType)) {
+                if ($recurse) {
+                    $text = recurseText($text);
+                }
+                if ($jsonPP) {
+                    $text = reencode($text);
+                }
+            } elsif ($mimeType eq 'application/x-www-form-urlencoded') {
+                my $obj = formData($text);
+                if ($recurse) {
+                    $obj = recurse($obj);
+                }
+                $text = $json->encode($obj);
+            } else {
+                print("??? $mimeType\n");
+            }
+            my ($ext) = getFileExtensions($mimeType);
+            my $filename = sprintf('%s/post-data/post-%04d%s', $entry->{dir}, $entry->{counter}, $ext // '');
+            make_path(dirname($filename));
+            path($filename)->spew($text);
+            printf $fhIndex ("%-*s %-5s %-32s %-7s\n", $col1len, $filename, '-', $mimeType, '(data)');
+        }
+    }
 }
