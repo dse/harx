@@ -40,6 +40,7 @@ our @urlPattern;
 our $jsonPP;
 our $mirror;
 our $recurse;
+our $byHost;
 
 # we have to make a function call like this at somewhere around this
 # point in order for future extensions() calls to work.
@@ -49,6 +50,7 @@ my $rw = Regexp::Wildcards->new(type => 'unix');
 
 Getopt::Long::Configure('bundling', 'gnu_compat', 'no_ignore_case');
 Getopt::Long::GetOptions(
+    'by-host' => \$byHost,
     'r|recurse' => \$recurse,
     'u|url-pattern=s' => \@urlPattern,
     'j|pp|jsonpp|json-pp' => \$jsonPP,
@@ -338,9 +340,14 @@ sub setEntryInitialFilename {
     my $url = $entry->{request}->{url};
     my $ext = $entry->{ext};
     my $dir = $entry->{dir};
+    my $uri = URI->new($url);
     my $filename = sprintf('%s/response-data/harx-%04d%s', $dir, $entry->{counter}, $ext // '');
+    if ($byHost) {
+        my $host = $uri->host;
+        $filename = sprintf('%s/response-data/%s/harx-%04d%s',
+                            $dir, $host, $entry->{counter}, $ext // '');
+    }
     if ($mirror) {
-        my $uri = URI->new($url);
         my $basename = $uri->path;
         $basename =~ s{^/+}{};
         $basename =~ s{/+$}{};
