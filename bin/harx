@@ -16,6 +16,10 @@ use File::Glob        qw(:bsd_glob);
 use Regexp::Wildcards qw();
 use URI               qw();
 use URI::Escape       qw(uri_unescape);
+use Data::Dumper      qw(Dumper);
+
+use File::MMagic;
+use File::MimeInfo;
 
 our $EXTENSIONS = {
     # File::MimeInfo returns a list of extensions given a mime type
@@ -79,6 +83,7 @@ END
 
 @urlPattern = map { qr{$_} } @urlPattern;
 my $json = JSON::XS->new()->ascii(1)->pretty(1)->canonical(1);
+my $mm = File::MMagic->new();
 my $harCounter = 0;
 local $/ = undef;               # slurp entire files at once
 while (<>) {
@@ -335,6 +340,10 @@ sub setEntryFileExtension {
     $entry->{mimeType} = $mimeType;
     my @ext = getFileExtensions($mimeType, $url);
     $entry->{ext} = $ext[0];
+    if (!defined $entry->{ext}) {
+        my $res = $mm->checktype_contents($response->{content});
+        print(Dumper($res));
+    }
 }
 
 sub setEntryInitialFilename {
